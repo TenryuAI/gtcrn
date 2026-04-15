@@ -6,6 +6,9 @@
 #include <memory>
 #include <onnxruntime_cxx_api.h>
 
+struct SpeexResamplerState_;
+typedef struct SpeexResamplerState_ SpeexResamplerState;
+
 class AudioProcessor {
 public:
     AudioProcessor(const std::string& model_path);
@@ -48,4 +51,25 @@ private:
     // Helper functions
     void init_window();
     void reset_caches();
+};
+
+class AudioProcessor48k {
+public:
+    static constexpr int IO_SAMPLE_RATE = 48000;
+    static constexpr int MODEL_SAMPLE_RATE = 16000;
+    static constexpr int IO_BLOCK_SIZE = 768;      // 48k * 16ms
+    static constexpr int MODEL_BLOCK_SIZE = 256;   // 16k * 16ms
+
+    explicit AudioProcessor48k(const std::string& model_path);
+    ~AudioProcessor48k();
+
+    // Process one 48kHz mono block of 768 samples.
+    void process_block(const float* input_48k, float* output_48k, float denoise_strength);
+
+private:
+    AudioProcessor core_;
+    SpeexResamplerState* input_resampler_;
+    SpeexResamplerState* output_resampler_;
+    std::vector<float> model_in_;
+    std::vector<float> model_out_;
 };

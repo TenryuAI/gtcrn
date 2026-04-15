@@ -1,5 +1,6 @@
 #include "AudioProcessor.h"
 #include "pocketfft_hdronly.h"
+#include <speex/speex_resampler.h>
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -143,4 +144,73 @@ void AudioProcessor::process_block(const float* input, float* output, float deno
     // 10. Shift out_buffer left and pad with zeros
     std::memmove(out_buffer_.data(), out_buffer_.data() + BLOCK_SIZE, (WINDOW_SIZE - BLOCK_SIZE) * sizeof(float));
     std::memset(out_buffer_.data() + WINDOW_SIZE - BLOCK_SIZE, 0, BLOCK_SIZE * sizeof(float));
+}
+
+AudioProcessor48k::AudioProcessor48k(const std::string& model_path)
+    : core_(model_path),
+      input_resampler_(nullptr),
+      output_resampler_(nullptr),
+      model_in_(MODEL_BLOCK_SIZE, 0.0f),
+      model_out_(MODEL_BLOCK_SIZE, 0.0f) {
+    int err = 0;
+    input_resampler_ = speex_resampler_init(1, IO_SAMPLE_RATE, MODEL_SAMPLE_RATE, 5, &err);
+    if (!input_resampler_ || err != RESAMPLER_ERR_SUCCESS) {
+        throw std::runtime_error("Failed to create 48k->16k Speex resampler");
+    }
+
+    output_resampler_ = speex_resampler_init(1, MODEL_SAMPLE_RATE, IO_SAMPLE_RATE, 5, &err);
+    if (!output_resampler_ || err != RESAMPLER_ERR_SUCCESS) {
+        if (input_resampler_) speex_resampler_destroy(input_resampler_);
+        throw std::runtime_error("Failed to create 16k->48k Speex resampler");
+    }
+
+    // Hide FIR warm-up latency so block lengths stay stable.
+    speex_resampler_skip_zeros(input_resampler_);
+    speex_resampler_skip_zeros(output_resampler_);
+}
+
+AudioProcessor48k::~AudioProcessor48k() {
+    if (input_resampler_) {
+        speex_resampler_destroy(input_resampler_);
+        input_resampler_ = nullptr;
+    }
+    if (output_resampler_) {
+        speex_resampler_destroy(output_resampler_);
+        output_resampler_ = nullptr;
+    }
+}
+
+void AudioProcessor48k::process_block(const float* input_48k, float* output_48k, float denoise_strength) {
+    std::fill(model_in_.begin(), model_in_.end(), 0.0f);
+    std::fill(model_out_.begin(), model_out_.end(), 0.0f);
+    std::fill(output_48k, output_48k + IO_BLOCK_SIZE, 0.0f);
+
+    spx_uint32_t in_len = IO_BLOCK_SIZE;
+    spx_uint32_t out_len = MODEL_BLOCK_SIZE;
+    int err = speex_resampler_process_float(
+        input_resampler_, 0, input_48k, &in_len, model_in_.data(), &out_len);
+    if (err != RESAMPLER_ERR_SUCCESS) {
+        return;
+    }
+
+    // On startup the resampler may output fewer samples; pad with zeros and
+    // keep the model cadence fixed at 256 samples per 16ms.
+    if (out_len < MODEL_BLOCK_SIZE) {
+        std::fill(model_in_.begin() + out_len, model_in_.end(), 0.0f);
+    }
+
+    core_.process_block(model_in_.data(), model_out_.data(), denoise_strength);
+
+    spx_uint32_t in_len_up = MODEL_BLOCK_SIZE;
+    spx_uint32_t out_len_up = IO_BLOCK_SIZE;
+    err = speex_resampler_process_float(
+        output_resampler_, 0, model_out_.data(), &in_len_up, output_48k, &out_len_up);
+    if (err != RESAMPLER_ERR_SUCCESS) {
+        std::fill(output_48k, output_48k + IO_BLOCK_SIZE, 0.0f);
+        return;
+    }
+
+    if (out_len_up < IO_BLOCK_SIZE) {
+        std::fill(output_48k + out_len_up, output_48k + IO_BLOCK_SIZE, 0.0f);
+    }
 }

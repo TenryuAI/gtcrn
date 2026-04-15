@@ -1,0 +1,84 @@
+cmake_minimum_required(VERSION 3.14)
+project(GTCRN_Stream_Linux)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(FetchContent)
+
+# 1. PocketFFT (Single header) - from the cpp branch
+set(POCKETFFT_HEADER "${CMAKE_BINARY_DIR}/pocketfft/pocketfft_hdronly.h")
+if(NOT EXISTS "${POCKETFFT_HEADER}")
+    message(STATUS "Downloading pocketfft_hdronly.h...")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/pocketfft")
+    file(DOWNLOAD
+        "https://raw.githubusercontent.com/mreineck/pocketfft/cpp/pocketfft_hdronly.h"
+        "${POCKETFFT_HEADER}"
+    )
+endif()
+add_library(pocketfft INTERFACE)
+target_include_directories(pocketfft INTERFACE "${CMAKE_BINARY_DIR}/pocketfft")
+
+# 2. ONNX Runtime for Linux ARM64
+set(ORT_VERSION "1.17.1")
+# CMAKE_SOURCE_DIR = .../gtcrn/cpp_src, ORT is at ~/onnxruntime-linux-aarch64-x.y.z
+# Allow override via -DORT_DIR=...
+if(NOT ORT_DIR)
+    set(ORT_DIR "$ENV{HOME}/onnxruntime-linux-aarch64-${ORT_VERSION}")
+endif()
+if(NOT EXISTS "${ORT_DIR}")
+    message(FATAL_ERROR
+        "ONNX Runtime not found at ${ORT_DIR}.\n"
+        "Please run: bash setup_rk3568.sh  or download manually:\n"
+        "wget https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-aarch64-${ORT_VERSION}.tgz\n"
+        "tar xzf onnxruntime-linux-aarch64-${ORT_VERSION}.tgz -C .."
+    )
+endif()
+
+add_library(onnxruntime_lib SHARED IMPORTED)
+set_target_properties(onnxruntime_lib PROPERTIES
+    IMPORTED_LOCATION "${ORT_DIR}/lib/libonnxruntime.so.${ORT_VERSION}"
+    IMPORTED_SONAME   "libonnxruntime.so.1"
+    INTERFACE_INCLUDE_DIRECTORIES "${ORT_DIR}/include"
+)
+
+# 3. PortAudio - use system library (already installed on RK3568)
+find_library(PORTAUDIO_LIB portaudio REQUIRED)
+find_path(PORTAUDIO_INCLUDE portaudio.h REQUIRED)
+message(STATUS "PortAudio library: ${PORTAUDIO_LIB}")
+message(STATUS "PortAudio include: ${PORTAUDIO_INCLUDE}")
+
+# 4. SpeexDSP resampler - used for 48kHz device I/O <-> 16kHz model
+find_library(SPEEXDSP_LIB speexdsp REQUIRED)
+find_path(SPEEXDSP_INCLUDE speex/speex_resampler.h REQUIRED)
+message(STATUS "SpeexDSP library: ${SPEEXDSP_LIB}")
+message(STATUS "SpeexDSP include: ${SPEEXDSP_INCLUDE}")
+
+# Source files
+add_executable(gtcrn_realtime
+    main_linux.cpp
+    AudioProcessor.cpp
+    AudioProcessor.h
+)
+
+target_include_directories(gtcrn_realtime PRIVATE
+    "${PORTAUDIO_INCLUDE}"
+    "${SPEEXDSP_INCLUDE}"
+    "${CMAKE_BINARY_DIR}/pocketfft"
+    "${ORT_DIR}/include"
+)
+
+target_link_libraries(gtcrn_realtime PRIVATE
+    pocketfft
+    onnxruntime_lib
+    ${PORTAUDIO_LIB}
+    ${SPEEXDSP_LIB}
+    pthread
+    dl
+)
+
+# Set RPATH so the binary can find libonnxruntime.so at runtime
+set_target_properties(gtcrn_realtime PROPERTIES
+    BUILD_RPATH "${ORT_DIR}/lib"
+    INSTALL_RPATH "${ORT_DIR}/lib"
+)
